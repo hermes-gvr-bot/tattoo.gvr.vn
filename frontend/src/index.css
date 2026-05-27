@@ -1,0 +1,113 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+}
+
+/* Tailscale Admin Console Dark Theme */
+body {
+  background-color: #121316;
+  color: #d1d5db;
+  font-family: 'Inter', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Sidebar pattern */
+.sidebar {
+  background-color: #0c0d10;
+  border-right: 1px solid #1e1f23;
+}
+
+/* Table patterns */
+.table-header {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #6b7280;
+}
+
+.table-row {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.table-row:hover {
+  background-color: rgba(255, 255, 255, 0.015);
+}
+
+/* Tags/Badges */
+.tag {
+  font-size: 10px;
+  font-weight: 500;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid rgba(107, 114, 128, 0.12);
+  background-color: rgba(107, 114, 128, 0.06);
+  color: #9ca3af;
+}
+
+/* Buttons */
+.btn-primary {
+  height: 36px;
+  padding: 0 16px;
+  border-radius: 6px;
+  background-color: #d1d5db;
+  color: #121316;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.btn-primary:hover {
+  background-color: #e5e7eb;
+}
+
+.btn-secondary {
+  height: 36px;
+  padding: 0 16px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background-color: rgba(255, 255, 255, 0.04);
+  color: #d1d5db;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.btn-secondary:hover {
+  background-color: rgba(255, 255, 255, 0.06);
+}
+
+/* Inputs */
+.input-field {
+  background-color: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  padding: 8px 12px;
+  color: #d1d5db;
+  font-size: 13px;
+  outline: none;
+}
+
+.input-field:focus {
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+.input-field::placeholder {
+  color: #6b7280;
+}
+
+/* Status badges */
+.status-pending { color: #f59e0b; }
+.status-generating { color: #3b82f6; }
+.status-completed { color: #22c55e; }
+.status-rejected { color: #ef4444; }
+.status-delivered { color: #6b7280; }
+
+/* Gauge bars */
+.gauge-bg {
+  background-color: rgba(255, 255, 255, 0.06);
+}
+
+.gauge-fill {
+  background-color: #6b7280;
+}
