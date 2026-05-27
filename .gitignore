@@ -1,0 +1,30 @@
+# Tattoo Consultation Website
+# https://tattoo.gvr.vn
+
+# Dependencies
+node_modules/
+frontend/dist/
+
+# Build
+backend/server
+*.exe
+
+# Environment
+.env
+.env.local
+*.env
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+thumbs.db
+
+# Uploads (keep dir, ignore files)
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# Docker
+pgdata/
