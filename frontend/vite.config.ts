@@ -20,6 +20,7 @@ export default defineConfig({
     ],
     proxy: {
       '/api': 'http://localhost:5200',
+      '/uploads': 'http://localhost:5200',
     },
   },
 })

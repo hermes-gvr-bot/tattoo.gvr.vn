@@ -12,6 +12,8 @@ import (
 	"tattoo-consultation/internal/db"
 	"tattoo-consultation/internal/handler"
 	"tattoo-consultation/internal/middleware"
+	"tattoo-consultation/internal/service"
+	"tattoo-consultation/internal/storage"
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
@@ -35,12 +37,18 @@ func main() {
 		log.Println("Migrations applied")
 	}
 
+	// Init S3/MinIO storage
+	s3Client, err := storage.NewS3Client(cfg.S3Endpoint, cfg.S3AccessKey, cfg.S3SecretKey, cfg.S3Bucket, cfg.S3PublicURL, cfg.S3UseSSL)
+	if err != nil {
+		log.Printf("S3 storage init failed (falling back to local disk): %v", err)
+	}
+
 	r := chi.NewRouter()
 	r.Use(chimw.Logger)
 	r.Use(chimw.Recoverer)
 	r.Use(chimw.RequestID)
 	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"http://localhost:5201", "https://tattoo.gvr.vn"},
+		AllowedOrigins:   []string{"http://localhost:5201", "http://100.86.223.10:5201", "http://tmds-server-local.tail3840e.ts.net:5201", "https://tattoo.gvr.vn"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Content-Type", "Authorization"},
 		AllowCredentials: true,
@@ -51,16 +59,32 @@ func main() {
 	r.Post("/api/auth/register", authHandler.Register)
 	r.Post("/api/auth/login", authHandler.Login)
 
-	// Protected routes
+	// Protect routes
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.AuthRequired(cfg.JWTSecret))
 		r.Get("/api/auth/me", authHandler.Me)
 
-		// Consultations
-		consHandler := &handler.ConsultationHandler{Pool: pool, UploadDir: cfg.UploadDir}
+		// Create generator (used by both consultation create + admin trigger)
+		generator := &service.Generator{
+			Pool:          pool,
+			UploadDir:     cfg.UploadDir,
+			OpenRouterKey: os.Getenv("OPENROUTER_API_KEY"),
+			TogetherKey:   os.Getenv("TOGETHER_API_KEY"),
+			ReplicateKey:  os.Getenv("REPLICATE_API_KEY"),
+			S3:            s3Client,
+		}
+
+		// Consultations (auto-generate on create)
+		consHandler := &handler.ConsultationHandler{Pool: pool, UploadDir: cfg.UploadDir, S3: s3Client, Generator: generator}
 		r.Post("/api/consultations", consHandler.Create)
 		r.Get("/api/consultations", consHandler.List)
 		r.Get("/api/consultations/{id}", consHandler.Get)
+
+		// Admin-only routes
+		genHandler := &handler.GenerateHandler{Pool: pool, UploadDir: cfg.UploadDir, Generator: generator}
+		r.Get("/api/admin/consultations", consHandler.AdminList)
+		r.Get("/api/admin/stats", consHandler.AdminStats)
+		r.Post("/api/admin/consultations/{id}/generate", genHandler.TriggerGenerate)
 	})
 
 	// Serve uploaded files

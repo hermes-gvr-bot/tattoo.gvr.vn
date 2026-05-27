@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,6 +11,8 @@ import (
 
 	"tattoo-consultation/internal/auth"
 	"tattoo-consultation/internal/middleware"
+	"tattoo-consultation/internal/service"
+	"tattoo-consultation/internal/storage"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -19,6 +22,8 @@ import (
 type ConsultationHandler struct {
 	Pool      *pgxpool.Pool
 	UploadDir string
+	S3        *storage.S3Client
+	Generator *service.Generator
 }
 
 func (h *ConsultationHandler) Create(w http.ResponseWriter, r *http.Request) {
@@ -42,30 +47,67 @@ func (h *ConsultationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	consultationType := r.FormValue("consultation_type")
+	if consultationType == "" {
+		consultationType = "new_tattoo"
+	}
+	if consultationType != "new_tattoo" && consultationType != "makeup_enhance" {
+		writeJSON(w, 400, map[string]string{"error": "consultation_type must be 'new_tattoo' or 'makeup_enhance'"})
+		return
+	}
+
 	ext := filepath.Ext(header.Filename)
 	if ext == "" {
 		ext = ".jpg"
 	}
 	photoName := uuid.New().String() + ext
-	photoPath := filepath.Join(h.UploadDir, photoName)
+	objectKey := "uploads/" + photoName
 
-	dst, err := os.Create(photoPath)
-	if err != nil {
-		writeJSON(w, 500, map[string]string{"error": "failed to save file"})
-		return
-	}
-	if _, err := io.Copy(dst, file); err != nil {
+	// Upload to S3 if available, fallback to local disk
+	var photoPath string
+	if h.S3 != nil {
+		// Save to temp file first, then upload to S3
+		tmpFile, err := os.CreateTemp("", "tattoo-upload-*"+ext)
+		if err != nil {
+			writeJSON(w, 500, map[string]string{"error": "failed to create temp file"})
+			return
+		}
+		if _, err := io.Copy(tmpFile, file); err != nil {
+			tmpFile.Close()
+			writeJSON(w, 500, map[string]string{"error": "failed to read upload"})
+			return
+		}
+		tmpFile.Close()
+
+		s3URL, err := h.S3.UploadFile(context.Background(), tmpFile.Name(), objectKey)
+		os.Remove(tmpFile.Name())
+		if err != nil {
+			writeJSON(w, 500, map[string]string{"error": "S3 upload failed: " + err.Error()})
+			return
+		}
+		photoPath = s3URL
+	} else {
+		// Fallback to local disk
+		localPath := filepath.Join(h.UploadDir, photoName)
+		dst, err := os.Create(localPath)
+		if err != nil {
+			writeJSON(w, 500, map[string]string{"error": "failed to save file"})
+			return
+		}
+		if _, err := io.Copy(dst, file); err != nil {
+			dst.Close()
+			writeJSON(w, 500, map[string]string{"error": "failed to write file"})
+			return
+		}
 		dst.Close()
-		writeJSON(w, 500, map[string]string{"error": "failed to write file"})
-		return
+		photoPath = "/uploads/" + photoName
 	}
-	dst.Close()
 
 	var consID string
 	err = h.Pool.QueryRow(r.Context(),
-		`INSERT INTO consultations (user_id, body_photo_path, idea_text, status)
-		 VALUES ($1, $2, $3, 'pending_payment') RETURNING id`,
-		claims.UserID, photoPath, ideaText,
+		`INSERT INTO consultations (user_id, body_photo_path, idea_text, status, consultation_type)
+		 VALUES ($1, $2, $3, 'pending_payment', $4) RETURNING id`,
+		claims.UserID, photoPath, ideaText, consultationType,
 	).Scan(&consID)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": fmt.Sprintf("db insert: %v", err)})
@@ -74,18 +116,40 @@ func (h *ConsultationHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, 201, map[string]interface{}{
 		"id":              consID,
-		"status":          "pending_payment",
-		"body_photo_path": "/uploads/" + photoName,
+		"status":          "generating",
+		"body_photo_path": photoPath,
 		"idea_text":       ideaText,
 	})
+
+	// Auto-trigger AI pipeline in background
+	if h.Generator != nil {
+		go func() {
+			logMsg("Starting AI pipeline for consultation " + consID)
+			if err := h.Generator.GenerateConsultation(context.Background(), consID); err != nil {
+				logMsg("AI pipeline failed for " + consID + ": " + err.Error())
+			} else {
+				logMsg("AI pipeline completed for " + consID)
+			}
+		}()
+	}
+}
+
+func logMsg(msg string) {
+	// Simple stdout log since we don't want to import log package
+	println("[auto-generate]", msg)
 }
 
 func (h *ConsultationHandler) List(w http.ResponseWriter, r *http.Request) {
 	claims := r.Context().Value(middleware.ClaimsKey).(*auth.Claims)
 
 	rows, err := h.Pool.Query(r.Context(),
-		`SELECT id, body_photo_path, idea_text, status, body_part, skin_tone, created_at
-		 FROM consultations WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50`,
+		`SELECT c.id, c.body_photo_path, c.idea_text, c.status, c.body_part, c.skin_tone, c.created_at,
+		        COUNT(v.id) as variant_count
+		 FROM consultations c
+		 LEFT JOIN variants v ON v.consultation_id = c.id
+		 WHERE c.user_id = $1
+		 GROUP BY c.id
+		 ORDER BY c.created_at DESC LIMIT 50`,
 		claims.UserID,
 	)
 	if err != nil {
@@ -102,13 +166,14 @@ func (h *ConsultationHandler) List(w http.ResponseWriter, r *http.Request) {
 		BodyPart      *string `json:"body_part"`
 		SkinTone      *string `json:"skin_tone"`
 		CreatedAt     string  `json:"created_at"`
+		VariantCount  int     `json:"variant_count"`
 	}
 
 	var cons []ConsultationRow
 	for rows.Next() {
 		var c ConsultationRow
 		var createdAt interface{}
-		if err := rows.Scan(&c.ID, &c.BodyPhotoPath, &c.IdeaText, &c.Status, &c.BodyPart, &c.SkinTone, &createdAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.BodyPhotoPath, &c.IdeaText, &c.Status, &c.BodyPart, &c.SkinTone, &createdAt, &c.VariantCount); err != nil {
 			continue
 		}
 		if t, ok := createdAt.(interface{ Format(string) string }); ok {
@@ -188,5 +253,73 @@ func (h *ConsultationHandler) Get(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]interface{}{
 		"consultation": c,
 		"variants":     variants,
+	})
+}
+
+// AdminList returns all consultations across all users.
+func (h *ConsultationHandler) AdminList(w http.ResponseWriter, r *http.Request) {
+	rows, err := h.Pool.Query(r.Context(),
+		`SELECT c.id, u.email as user_email, c.body_photo_path, c.idea_text, c.status,
+		        c.body_part, c.skin_tone, c.created_at, COUNT(v.id) as variant_count
+		 FROM consultations c
+		 JOIN users u ON u.id = c.user_id
+		 LEFT JOIN variants v ON v.consultation_id = c.id
+		 GROUP BY c.id, u.email
+		 ORDER BY c.created_at DESC LIMIT 100`,
+	)
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": "query failed"})
+		return
+	}
+	defer rows.Close()
+
+	type AdminRow struct {
+		ID            string  `json:"id"`
+		UserEmail     string  `json:"user_email"`
+		BodyPhotoPath string  `json:"body_photo_path"`
+		IdeaText      string  `json:"idea_text"`
+		Status        string  `json:"status"`
+		BodyPart      *string `json:"body_part"`
+		SkinTone      *string `json:"skin_tone"`
+		CreatedAt     string  `json:"created_at"`
+		VariantCount  int     `json:"variant_count"`
+	}
+
+	var cons []AdminRow
+	for rows.Next() {
+		var c AdminRow
+		var createdAt interface{}
+		if err := rows.Scan(&c.ID, &c.UserEmail, &c.BodyPhotoPath, &c.IdeaText, &c.Status, &c.BodyPart, &c.SkinTone, &createdAt, &c.VariantCount); err != nil {
+			continue
+		}
+		if t, ok := createdAt.(interface{ Format(string) string }); ok {
+			c.CreatedAt = t.Format("2006-01-02T15:04:05Z")
+		} else {
+			c.CreatedAt = fmt.Sprintf("%v", createdAt)
+		}
+		cons = append(cons, c)
+	}
+	if cons == nil {
+		cons = []AdminRow{}
+	}
+
+	writeJSON(w, 200, cons)
+}
+
+// AdminStats returns aggregate statistics.
+func (h *ConsultationHandler) AdminStats(w http.ResponseWriter, r *http.Request) {
+	var total, pending, generating, completed, rejected int
+	h.Pool.QueryRow(r.Context(), `SELECT COUNT(*) FROM consultations`).Scan(&total)
+	h.Pool.QueryRow(r.Context(), `SELECT COUNT(*) FROM consultations WHERE status = 'pending_payment'`).Scan(&pending)
+	h.Pool.QueryRow(r.Context(), `SELECT COUNT(*) FROM consultations WHERE status = 'generating'`).Scan(&generating)
+	h.Pool.QueryRow(r.Context(), `SELECT COUNT(*) FROM consultations WHERE status = 'completed'`).Scan(&completed)
+	h.Pool.QueryRow(r.Context(), `SELECT COUNT(*) FROM consultations WHERE status = 'rejected'`).Scan(&rejected)
+
+	writeJSON(w, 200, map[string]interface{}{
+		"total":      total,
+		"pending":    pending,
+		"generating": generating,
+		"completed":  completed,
+		"rejected":   rejected,
 	})
 }
