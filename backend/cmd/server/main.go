@@ -55,7 +55,17 @@ func main() {
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.AuthRequired(cfg.JWTSecret))
 		r.Get("/api/auth/me", authHandler.Me)
+
+		// Consultations
+		consHandler := &handler.ConsultationHandler{Pool: pool, UploadDir: cfg.UploadDir}
+		r.Post("/api/consultations", consHandler.Create)
+		r.Get("/api/consultations", consHandler.List)
+		r.Get("/api/consultations/{id}", consHandler.Get)
 	})
+
+	// Serve uploaded files
+	uploadsDir := http.Dir(cfg.UploadDir)
+	r.Handle("/uploads/*", http.StripPrefix("/uploads/", http.FileServer(uploadsDir)))
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

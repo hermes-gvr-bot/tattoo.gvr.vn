@@ -14,6 +14,8 @@ import { Route as LoginRouteImport } from './routes/login'
 import { Route as DashboardRouteImport } from './routes/dashboard'
 import { Route as AdminRouteImport } from './routes/admin'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ConsultationsNewRouteImport } from './routes/consultations.new'
+import { Route as ConsultationsIdRouteImport } from './routes/consultations.$id'
 
 const SignupRoute = SignupRouteImport.update({
   id: '/signup',
@@ -40,6 +42,16 @@ const IndexRoute = IndexRouteImport.update({
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ConsultationsNewRoute = ConsultationsNewRouteImport.update({
+  id: '/consultations/new',
+  path: '/consultations/new',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ConsultationsIdRoute = ConsultationsIdRouteImport.update({
+  id: '/consultations/$id',
+  path: '/consultations/$id',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -47,6 +59,8 @@ export interface FileRoutesByFullPath {
   '/dashboard': typeof DashboardRoute
   '/login': typeof LoginRoute
   '/signup': typeof SignupRoute
+  '/consultations/$id': typeof ConsultationsIdRoute
+  '/consultations/new': typeof ConsultationsNewRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -54,6 +68,8 @@ export interface FileRoutesByTo {
   '/dashboard': typeof DashboardRoute
   '/login': typeof LoginRoute
   '/signup': typeof SignupRoute
+  '/consultations/$id': typeof ConsultationsIdRoute
+  '/consultations/new': typeof ConsultationsNewRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -62,13 +78,37 @@ export interface FileRoutesById {
   '/dashboard': typeof DashboardRoute
   '/login': typeof LoginRoute
   '/signup': typeof SignupRoute
+  '/consultations/$id': typeof ConsultationsIdRoute
+  '/consultations/new': typeof ConsultationsNewRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/admin' | '/dashboard' | '/login' | '/signup'
+  fullPaths:
+    | '/'
+    | '/admin'
+    | '/dashboard'
+    | '/login'
+    | '/signup'
+    | '/consultations/$id'
+    | '/consultations/new'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/admin' | '/dashboard' | '/login' | '/signup'
-  id: '__root__' | '/' | '/admin' | '/dashboard' | '/login' | '/signup'
+  to:
+    | '/'
+    | '/admin'
+    | '/dashboard'
+    | '/login'
+    | '/signup'
+    | '/consultations/$id'
+    | '/consultations/new'
+  id:
+    | '__root__'
+    | '/'
+    | '/admin'
+    | '/dashboard'
+    | '/login'
+    | '/signup'
+    | '/consultations/$id'
+    | '/consultations/new'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -77,6 +117,8 @@ export interface RootRouteChildren {
   DashboardRoute: typeof DashboardRoute
   LoginRoute: typeof LoginRoute
   SignupRoute: typeof SignupRoute
+  ConsultationsIdRoute: typeof ConsultationsIdRoute
+  ConsultationsNewRoute: typeof ConsultationsNewRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -116,6 +158,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/consultations/new': {
+      id: '/consultations/new'
+      path: '/consultations/new'
+      fullPath: '/consultations/new'
+      preLoaderRoute: typeof ConsultationsNewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/consultations/$id': {
+      id: '/consultations/$id'
+      path: '/consultations/$id'
+      fullPath: '/consultations/$id'
+      preLoaderRoute: typeof ConsultationsIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -125,6 +181,8 @@ const rootRouteChildren: RootRouteChildren = {
   DashboardRoute: DashboardRoute,
   LoginRoute: LoginRoute,
   SignupRoute: SignupRoute,
+  ConsultationsIdRoute: ConsultationsIdRoute,
+  ConsultationsNewRoute: ConsultationsNewRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
