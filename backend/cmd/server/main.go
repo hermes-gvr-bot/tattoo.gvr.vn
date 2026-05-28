@@ -64,6 +64,14 @@ func main() {
 		r.Use(middleware.AuthRequired(cfg.JWTSecret))
 		r.Get("/api/auth/me", authHandler.Me)
 
+		// Create LoRA service for body preview generation
+		loraService := &service.LoraService{
+			Pool:         pool,
+			UploadDir:    cfg.UploadDir,
+			ReplicateKey: os.Getenv("REPLICATE_API_KEY"),
+			S3:           s3Client,
+		}
+
 		// Create generator (used by both consultation create + admin trigger)
 		generator := &service.Generator{
 			Pool:          pool,
@@ -72,13 +80,16 @@ func main() {
 			TogetherKey:   os.Getenv("TOGETHER_API_KEY"),
 			ReplicateKey:  os.Getenv("REPLICATE_API_KEY"),
 			S3:            s3Client,
+			Lora:          loraService,
 		}
 
 		// Consultations (auto-generate on create)
-		consHandler := &handler.ConsultationHandler{Pool: pool, UploadDir: cfg.UploadDir, S3: s3Client, Generator: generator}
+		consHandler := &handler.ConsultationHandler{Pool: pool, UploadDir: cfg.UploadDir, S3: s3Client, Generator: generator, Lora: loraService}
 		r.Post("/api/consultations", consHandler.Create)
 		r.Get("/api/consultations", consHandler.List)
 		r.Get("/api/consultations/{id}", consHandler.Get)
+		r.Post("/api/consultations/{id}/photos", consHandler.UploadPhotos)
+		r.Get("/api/consultations/{id}/lora-status", consHandler.LoraStatus)
 
 		// Admin-only routes
 		genHandler := &handler.GenerateHandler{Pool: pool, UploadDir: cfg.UploadDir, Generator: generator}

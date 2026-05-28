@@ -27,6 +27,7 @@ type Generator struct {
 	TogetherKey       string
 	ReplicateKey      string
 	S3                *storage.S3Client
+	Lora              *LoraService
 	replicateLastCall time.Time
 	replicateMu       sync.Mutex
 }
@@ -253,6 +254,11 @@ func (g *Generator) generateVariants(ctx context.Context, consultationID string,
 		return fmt.Errorf("complete consultation: %w", err)
 	}
 
+	// Kick off LoRA body preview in background (doesn't block standard completion)
+	if g.Lora != nil {
+		go g.generateBodyPreviews(context.Background(), consultationID, variantIDs, prompts)
+	}
+
 	return nil
 }
 
@@ -420,6 +426,77 @@ func (g *Generator) generateFinal(prompt string, outputPath string) error {
 		return os.WriteFile(outputPath, imgData, 0644)
 	}
 	return fmt.Errorf("final failed after 5 attempts: %w", lastErr)
+}
+
+// generateBodyPreviews kicks off LoRA training then generates body-superimposed previews for each variant.
+func (g *Generator) generateBodyPreviews(ctx context.Context, consultationID string, variantIDs []string, prompts []CraftedPrompt) {
+	println("[lora]", consultationID, "starting body preview pipeline...")
+
+	// 1. Get all photos for this consultation (main photo + extras)
+	photos, err := g.Lora.GetPhotosForConsultation(ctx, consultationID)
+	if err != nil || len(photos) == 0 {
+		println("[lora]", consultationID, "no extra photos, skipping LoRA")
+		return
+	}
+
+	// 2. Train LoRA
+	lora, err := g.Lora.TrainLora(ctx, photos, consultationID)
+	if err != nil {
+		println("[lora]", consultationID, "train failed:", err.Error())
+		return
+	}
+	println("[lora]", consultationID, "training started:", lora.ReplicateTrainingID)
+
+	// 3. Wait for training (10 min timeout)
+	lora, err = g.Lora.WaitForLora(ctx, lora, 10*time.Minute)
+	if err != nil {
+		println("[lora]", consultationID, "wait failed:", err.Error())
+		return
+	}
+	println("[lora]", consultationID, "LoRA ready:", lora.LoraWeightsURL)
+
+	// 4. Get body photo URL
+	var bodyPhotoURL string
+	g.Pool.QueryRow(ctx,
+		`SELECT body_photo_path FROM consultations WHERE id = $1`,
+		consultationID,
+	).Scan(&bodyPhotoURL)
+
+	// 5. Generate body preview for each variant
+	for i, vid := range variantIDs {
+		g.Pool.Exec(ctx,
+			`UPDATE variants SET body_preview_status = 'generating' WHERE id = $1`, vid,
+		)
+
+		previewKey := fmt.Sprintf("variants/%s_body_preview.png", vid)
+		previewFullPath := filepath.Join(g.UploadDir, previewKey)
+
+		err := g.Lora.GenerateBodyPreview(ctx, lora, bodyPhotoURL, prompts[i].FullPrompt, previewFullPath)
+		if err != nil {
+			println("[lora]", consultationID, "body preview variant", i+1, "failed:", err.Error())
+			g.Pool.Exec(ctx,
+				`UPDATE variants SET body_preview_status = 'failed' WHERE id = $1`, vid,
+			)
+			continue
+		}
+
+		// Upload to S3
+		previewStorePath := "/uploads/" + previewKey
+		if g.S3 != nil {
+			s3URL, err := g.S3.UploadFile(ctx, previewFullPath, previewKey)
+			if err == nil {
+				previewStorePath = s3URL
+			}
+		}
+
+		g.Pool.Exec(ctx,
+			`UPDATE variants SET body_preview_path = $1, body_preview_status = 'completed' WHERE id = $2`,
+			previewStorePath, vid,
+		)
+		println("[lora]", consultationID, "body preview variant", i+1, "completed")
+	}
+
+	println("[lora]", consultationID, "all body previews done")
 }
 
 // failConsultation marks consultation as failed with error note.

@@ -24,6 +24,7 @@ type ConsultationHandler struct {
 	UploadDir string
 	S3        *storage.S3Client
 	Generator *service.Generator
+	Lora      *service.LoraService
 }
 
 func (h *ConsultationHandler) Create(w http.ResponseWriter, r *http.Request) {
@@ -222,7 +223,7 @@ func (h *ConsultationHandler) Get(w http.ResponseWriter, r *http.Request) {
 
 	// Fetch variants
 	rows, err := h.Pool.Query(r.Context(),
-		`SELECT id, variant_number, prompt_used, sketch_path, final_path, sketch_status, final_status
+		`SELECT id, variant_number, prompt_used, sketch_path, final_path, body_preview_path, sketch_status, final_status, COALESCE(body_preview_status, 'pending')
 		 FROM variants WHERE consultation_id = $1 ORDER BY variant_number`, consID)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": "variants query failed"})
@@ -230,20 +231,22 @@ func (h *ConsultationHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	type Variant struct {
-		ID            string  `json:"id"`
-		VariantNumber int     `json:"variant_number"`
-		PromptUsed    string  `json:"prompt_used"`
-		SketchPath    *string `json:"sketch_path"`
-		FinalPath     *string `json:"final_path"`
-		SketchStatus  string  `json:"sketch_status"`
-		FinalStatus   string  `json:"final_status"`
-	}
+		type Variant struct {
+			ID                string  `json:"id"`
+			VariantNumber     int     `json:"variant_number"`
+			PromptUsed        string  `json:"prompt_used"`
+			SketchPath        *string `json:"sketch_path"`
+			FinalPath         *string `json:"final_path"`
+			BodyPreviewPath   *string `json:"body_preview_path"`
+			SketchStatus      string  `json:"sketch_status"`
+			FinalStatus       string  `json:"final_status"`
+			BodyPreviewStatus string  `json:"body_preview_status"`
+		}
 
 	var variants []Variant
 	for rows.Next() {
 		var v Variant
-		rows.Scan(&v.ID, &v.VariantNumber, &v.PromptUsed, &v.SketchPath, &v.FinalPath, &v.SketchStatus, &v.FinalStatus)
+		rows.Scan(&v.ID, &v.VariantNumber, &v.PromptUsed, &v.SketchPath, &v.FinalPath, &v.BodyPreviewPath, &v.SketchStatus, &v.FinalStatus, &v.BodyPreviewStatus)
 		variants = append(variants, v)
 	}
 	if variants == nil {
@@ -322,4 +325,126 @@ func (h *ConsultationHandler) AdminStats(w http.ResponseWriter, r *http.Request)
 		"completed":  completed,
 		"rejected":   rejected,
 	})
+}
+
+// UploadPhotos handles multi-photo upload for LoRA body preview training.
+func (h *ConsultationHandler) UploadPhotos(w http.ResponseWriter, r *http.Request) {
+	claims := r.Context().Value(middleware.ClaimsKey).(*auth.Claims)
+	consID := chi.URLParam(r, "id")
+
+	// Verify ownership
+	var ownerID string
+	err := h.Pool.QueryRow(r.Context(),
+		`SELECT user_id FROM consultations WHERE id = $1`, consID,
+	).Scan(&ownerID)
+	if err != nil {
+		writeJSON(w, 404, map[string]string{"error": "consultation not found"})
+		return
+	}
+	if ownerID != claims.UserID {
+		writeJSON(w, 403, map[string]string{"error": "not your consultation"})
+		return
+	}
+
+	if err := r.ParseMultipartForm(50 << 20); err != nil { // 50MB for multiple photos
+		writeJSON(w, 400, map[string]string{"error": "files too large (max 50MB total)"})
+		return
+	}
+
+	files := r.MultipartForm.File["photos"]
+	if len(files) == 0 {
+		writeJSON(w, 400, map[string]string{"error": "at least one photo required"})
+		return
+	}
+	if len(files) > 10 {
+		writeJSON(w, 400, map[string]string{"error": "max 10 photos"})
+		return
+	}
+
+	var uploaded []map[string]interface{}
+	for i, fh := range files {
+		file, err := fh.Open()
+		if err != nil {
+			continue
+		}
+		defer file.Close()
+
+		ext := filepath.Ext(fh.Filename)
+		if ext == "" {
+			ext = ".jpg"
+		}
+		photoName := uuid.New().String() + ext
+		objectKey := "uploads/" + photoName
+
+		var photoURL string
+		if h.S3 != nil {
+			tmpFile, _ := os.CreateTemp("", "tattoo-photo-*"+ext)
+			io.Copy(tmpFile, file)
+			tmpFile.Close()
+			s3URL, err := h.S3.UploadFile(context.Background(), tmpFile.Name(), objectKey)
+			os.Remove(tmpFile.Name())
+			if err != nil {
+				continue
+			}
+			photoURL = s3URL
+		} else {
+			localPath := filepath.Join(h.UploadDir, photoName)
+			dst, _ := os.Create(localPath)
+			io.Copy(dst, file)
+			dst.Close()
+			photoURL = "/uploads/" + photoName
+		}
+
+		// Save to consultation_photos
+		var photoID string
+		h.Pool.QueryRow(r.Context(),
+			`INSERT INTO consultation_photos (consultation_id, photo_url, photo_order)
+			 VALUES ($1, $2, $3) RETURNING id`,
+			consID, photoURL, i+1,
+		).Scan(&photoID)
+
+		uploaded = append(uploaded, map[string]interface{}{
+			"id":    photoID,
+			"url":   photoURL,
+			"order": i + 1,
+		})
+	}
+
+	writeJSON(w, 201, map[string]interface{}{
+		"uploaded": len(uploaded),
+		"photos":   uploaded,
+	})
+}
+
+// LoraStatus returns the current LoRA training status for a consultation.
+func (h *ConsultationHandler) LoraStatus(w http.ResponseWriter, r *http.Request) {
+	consID := chi.URLParam(r, "id")
+
+	var lora struct {
+		ID              string  `json:"id"`
+		Status          string  `json:"status"`
+		TriggerWord     *string `json:"trigger_word"`
+		TotalPhotos     int     `json:"total_photos"`
+		ErrorMessage    *string `json:"error_message"`
+		CreatedAt       string  `json:"created_at"`
+		UpdatedAt       string  `json:"updated_at"`
+	}
+
+	err := h.Pool.QueryRow(r.Context(),
+		`SELECT id, status, trigger_word, total_photos, error_message,
+		        to_char(created_at, 'YYYY-MM-DD HH24:MI:SS'),
+		        to_char(updated_at, 'YYYY-MM-DD HH24:MI:SS')
+		 FROM loras WHERE consultation_id = $1 ORDER BY created_at DESC LIMIT 1`,
+		consID,
+	).Scan(&lora.ID, &lora.Status, &lora.TriggerWord, &lora.TotalPhotos, &lora.ErrorMessage, &lora.CreatedAt, &lora.UpdatedAt)
+
+	if err != nil {
+		// No LoRA training started yet
+		writeJSON(w, 200, map[string]interface{}{
+			"status": "not_started",
+		})
+		return
+	}
+
+	writeJSON(w, 200, lora)
 }
